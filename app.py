@@ -3,7 +3,7 @@ import os
 import pandas as pd
 from google import generativeai as genai
 import json
-import glob
+import tempfile
 
 # Available fields for extraction
 AVAILABLE_FIELDS = {
@@ -14,8 +14,6 @@ AVAILABLE_FIELDS = {
     "claim_number": "Claim Number or Settlement Number (e.g., 'Claim ID', 'Settlement ID', 'Case Number')",
     "payment_credited_date": "Payment Credited Date (e.g., 'Payment Date', 'Credit Date', 'Transaction Date')"
 }
-
-# ... (keep all your imports and AVAILABLE_FIELDS the same)
 
 def extract_structured_data(file_path: str, model, selected_fields: list):
     try:
@@ -56,17 +54,18 @@ def extract_structured_data(file_path: str, model, selected_fields: list):
         st.error(f"Error processing {os.path.basename(file_path)}: {str(e)}")
         return None
 
-# Streamlit app
 def main():
     st.set_page_config(page_title="PDF Data Extractor", layout="wide")
     st.title("Bulk PDF Data Extractor")
-    st.subheader("Upload a folder of PDF files and select fields to extract")
+    st.subheader("Upload multiple PDF files and select fields to extract")
 
-    # Initialize session state for tracking failed files
+    # Initialize session state
     if 'failed_files' not in st.session_state:
         st.session_state.failed_files = []
     if 'processed_files' not in st.session_state:
         st.session_state.processed_files = []
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
 
     # Input for Gemini API key
     api_key = st.text_input("Enter your Gemini API Key", type="password")
@@ -95,26 +94,46 @@ def main():
         st.warning("Please select at least one field to extract.")
         return
 
-    # Folder path input
-    st.write("Enter the path to the folder containing PDF files (e.g., C:/Users/YourName/Documents/pdfs):")
-    folder_path = st.text_input("Folder Path")
-    uploaded_files = []
-    if folder_path and os.path.isdir(folder_path):
-        uploaded_files = glob.glob(os.path.join(folder_path, "*.pdf"))
-        if not uploaded_files:
-            st.warning("No PDF files found in the specified folder.")
-        else:
-            st.write(f"Found {len(uploaded_files)} PDF files in the folder.")
+    # Multi-file uploader
+    uploaded_files = st.file_uploader(
+        "Upload multiple PDF files",
+        type="pdf",
+        accept_multiple_files=True
+    )
+    
+    if uploaded_files:
+        st.success(f"Selected {len(uploaded_files)} PDF files for processing")
 
     # Process button
     if st.button("Extract Data") and uploaded_files and api_key and selected_fields:
-        with st.spinner("Processing PDFs..."):
-            # Initialize DataFrame to store results
-            results = []
-            st.session_state.failed_files = []  # Reset failed files list
+        st.session_state.processing_complete = False
+        results = []
+        st.session_state.failed_files = []
+        
+        # Create a progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Create a temporary directory for uploaded files
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Save uploaded files to temp directory
+            saved_files = []
+            for i, uploaded_file in enumerate(uploaded_files):
+                file_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                saved_files.append(file_path)
             
-            for file_path in uploaded_files:
+            # Process each file
+            for i, file_path in enumerate(saved_files):
                 file_name = os.path.basename(file_path)
+                
+                # Update progress
+                progress = int((i + 1) / len(saved_files) * 100)
+                progress_bar.progress(progress)
+                status_text.text(f"Processing {i+1} of {len(saved_files)}: {file_name}")
+                
+                # Process the file
                 extracted_data = extract_structured_data(file_path, model, selected_fields)
                 
                 if extracted_data:
@@ -127,54 +146,73 @@ def main():
                 else:
                     st.session_state.failed_files.append(file_name)
             
-            if results:
-                # Convert results to DataFrame
-                df = pd.DataFrame(results)
-                
-                # Display results
-                st.write("Extracted Data:")
-                st.dataframe(df)
-                
-                # Save to CSV
-                csv_data = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Data as CSV",
-                    data=csv_data,
-                    file_name="extracted_data.csv",
-                    mime="text/csv",
-                    key="download-csv"
-                )
-                
-                # Show success message with stats
-                success_rate = len(results)/len(uploaded_files)*100
-                st.success(f"Data extraction completed! Success rate: {success_rate:.1f}%")
-                
-                # Show failed files if any
-                if st.session_state.failed_files:
-                    st.warning(f"Failed to process {len(st.session_state.failed_files)} files:")
-                    st.write(st.session_state.failed_files)
-            else:
-                st.error("No data extracted from the provided PDFs.")
+            st.session_state.processing_complete = True
+        
+        # Display results after processing
+        if results:
+            # Convert results to DataFrame
+            df = pd.DataFrame(results)
+            
+            # Display results
+            st.write("Extracted Data:")
+            st.dataframe(df)
+            
+            # Save to CSV
+            csv_data = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Data as CSV",
+                data=csv_data,
+                file_name="extracted_data.csv",
+                mime="text/csv",
+                key="download-csv"
+            )
+            
+            # Show success message with stats
+            success_rate = len(results)/len(uploaded_files)*100
+            st.success(f"Data extraction completed! Success rate: {success_rate:.1f}%")
+            
+            # Show failed files if any
+            if st.session_state.failed_files:
+                st.warning(f"Failed to process {len(st.session_state.failed_files)} files:")
+                st.write(st.session_state.failed_files)
+        else:
+            st.error("No data extracted from the provided PDFs.")
 
     # Reprocess failed files button
-    if st.session_state.failed_files and st.button("Reprocess Failed Files"):
+    if st.session_state.failed_files and st.session_state.processing_complete and st.button("Reprocess Failed Files"):
         with st.spinner(f"Reprocessing {len(st.session_state.failed_files)} failed files..."):
             results = []
             new_failures = []
             
-            for file_name in st.session_state.failed_files:
-                file_path = os.path.join(folder_path, file_name)
-                extracted_data = extract_structured_data(file_path, model, selected_fields)
+            # Create a progress bar for reprocessing
+            reprocess_bar = st.progress(0)
+            reprocess_status = st.empty()
+            
+            for i, file_name in enumerate(st.session_state.failed_files):
+                # Update progress
+                progress = int((i + 1) / len(st.session_state.failed_files) * 100)
+                reprocess_bar.progress(progress)
+                reprocess_status.text(f"Reprocessing {i+1} of {len(st.session_state.failed_files)}: {file_name}")
                 
-                if extracted_data:
-                    # Create a row with file name and only selected fields
-                    row = {"File Name": file_name}
-                    for field in selected_fields:
-                        row[field] = extracted_data.get(field, "Not Found")
-                    results.append(row)
-                    st.session_state.processed_files.append(file_name)
-                else:
-                    new_failures.append(file_name)
+                # Find the file in uploaded files
+                for uploaded_file in uploaded_files:
+                    if uploaded_file.name == file_name:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                            tmp_file.write(uploaded_file.getbuffer())
+                            tmp_path = tmp_file.name
+                        
+                        extracted_data = extract_structured_data(tmp_path, model, selected_fields)
+                        os.unlink(tmp_path)
+                        
+                        if extracted_data:
+                            row = {"File Name": file_name}
+                            for field in selected_fields:
+                                row[field] = extracted_data.get(field, "Not Found")
+                            results.append(row)
+                            st.session_state.processed_files.append(file_name)
+                        else:
+                            new_failures.append(file_name)
+                        break
             
             # Update failed files list
             st.session_state.failed_files = new_failures
